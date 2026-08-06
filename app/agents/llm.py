@@ -29,14 +29,17 @@ Do not provide coaching instructions, just provide the actual response you would
 
 def _build_user_prompt(state: State, plan: PlannerSuggestion) -> str:
     history = "\n".join(f"- {h}" for h in state.history[-4:]) or "(none yet)"
-    if plan.used_fallback or not plan.next_agent_tags:
+    if plan.used_llm_fallback and plan.next_agent_tags:
+        tags = ", ".join(plan.next_agent_tags)
+        guidance = f"Recommended next action(s): {tags} (LLM-generated plan)."
+    elif plan.used_fallback or not plan.next_agent_tags:
         guidance = "(no graph match — propose a sensible next move from the transcript alone.)"
     else:
         tags = ", ".join(plan.next_agent_tags)
         guidance = (
             f"Historical playbook for similar calls suggests next action(s): {tags}. "
             f"Expected outcome: {plan.expected_outcome or 'unknown'} "
-            f"(planner_confidence={plan.confidence:.2f})."
+            f"(planner_confidence={plan.planner_confidence:.2f})."
         )
 
     return f"""Conversation context:

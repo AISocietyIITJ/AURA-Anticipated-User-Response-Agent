@@ -36,6 +36,12 @@ class PlannerSuggestion(BaseModel):
     confidence: float = 0.0
     rationale: str = ""
     used_fallback: bool = False
+    # Effective planner confidence used for the fallback threshold decision.
+    # Matches `confidence` on the graph path; reflects the (low) graph confidence
+    # that triggered the LLM fallback otherwise.
+    planner_confidence: float = 0.0
+    used_llm_fallback: bool = False
+    fallback_reason: str = ""
 
 
 class CopilotResponse(BaseModel):

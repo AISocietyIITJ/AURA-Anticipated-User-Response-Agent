@@ -23,6 +23,18 @@ class Settings(BaseSettings):
 
     dataset_path: str = "data/final_master_dataset_complete_final.json"
 
+    # --- Planner (Neo4j graph is primary; LLM is a fallback) ---
+    # If the effective planner confidence is below this value, the planner
+    # asks the LLM to generate the next-agent plan.
+    planner_confidence_threshold: float = 0.60
+
+    # Optional LLM overrides for the planner fallback call. When planner_llm_model
+    # is unset, the shared llm_model is used.
+    planner_llm_model: str | None = None
+    planner_llm_temperature: float = 0.0
+    planner_llm_max_tokens: int = 256
+    planner_llm_timeout: float = 60.0
+
     log_level: str = "INFO"
 
 
