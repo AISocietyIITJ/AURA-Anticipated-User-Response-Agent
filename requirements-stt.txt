@@ -1,4 +1,0 @@
-# Optional: speech-to-text via NVIDIA NeMo + Parakeet.
-# Install only if you want the /audio endpoint to work.
-# Heavy install (~5GB). Run AFTER installing requirements.txt.
-nemo_toolkit[asr]==2.0.0rc0

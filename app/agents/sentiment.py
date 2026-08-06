@@ -1,48 +1,85 @@
 """
-Sentiment Agent: CardiffNLP twitter-roberta-base-sentiment-latest.
+Sentiment Agent — LLM-based (Hugging Face router, OpenAI-compatible).
 
-Outputs a continuous score in [-1.0, 1.0] (negative = -1, positive = +1)
-plus a discrete label {negative, neutral, positive}.
-
-Score is computed as p(positive) - p(negative) so the planner can bucket it
-the same way the dataset's sentiment_score was bucketed.
+Uses the same LLM endpoint that's already working for the main chat.
+Sends a structured prompt asking for JSON with sentiment score + label.
+No separate model or API endpoint needed.
 """
 
 from __future__ import annotations
 
-from functools import lru_cache
+import json
+import logging
+import re
 
-import torch
-import torch.nn.functional as F
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import httpx
 
 from app.core.config import settings
 from app.core.schemas import Sentiment
 
+log = logging.getLogger(__name__)
 
-@lru_cache(maxsize=1)
-def _load():
-    name = settings.sentiment_model
-    tok = AutoTokenizer.from_pretrained(name)
-    mdl = AutoModelForSequenceClassification.from_pretrained(name)
-    device = "cuda" if (settings.device == "cuda" and torch.cuda.is_available()) else "cpu"
-    mdl = mdl.to(device).eval()
-    id2label = {int(k): v.lower() for k, v in mdl.config.id2label.items()}
-    return tok, mdl, device, id2label
+_SYSTEM = (
+    "You are a sentiment analysis engine. Respond ONLY with a valid JSON object — "
+    "no markdown, no explanation."
+)
+
+_USER_TMPL = """\
+Analyse the sentiment of the following customer message.
+
+Return exactly this JSON structure:
+{{
+  "label": "<negative | neutral | positive>",
+  "score": <float from -1.0 (very negative) to 1.0 (very positive)>
+}}
+
+Customer message:
+\"{text}\"
+"""
+
+
+def _call_llm(prompt: str) -> str:
+    url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
+    payload = {
+        "model": settings.llm_model,
+        "messages": [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 40,
+        "temperature": 0.0,
+    }
+    with httpx.Client(timeout=30.0) as client:
+        r = client.post(url, json=payload, headers=headers)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def _extract_json(text: str) -> dict:
+    text = re.sub(r"^```[a-z]*\n?", "", text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"\n?```$", "", text.strip())
+    return json.loads(text)
 
 
 def analyze(text: str) -> Sentiment:
     text = (text or "").strip()
     if not text:
         return Sentiment(score=0.0, label="neutral")
-    tok, mdl, device, id2label = _load()
-    with torch.no_grad():
-        enc = tok(text, truncation=True, max_length=256, return_tensors="pt").to(device)
-        probs = F.softmax(mdl(**enc).logits, dim=-1)[0].cpu().numpy()
 
-    p_neg = float(probs[[i for i, l in id2label.items() if l == "negative"][0]])
-    p_pos = float(probs[[i for i, l in id2label.items() if l == "positive"][0]])
-    top_idx = int(probs.argmax())
-    label = id2label.get(top_idx, "neutral")
-    score = max(-1.0, min(1.0, p_pos - p_neg))
-    return Sentiment(score=score, label=label)
+    try:
+        raw = _call_llm(_USER_TMPL.format(text=text))
+        data = _extract_json(raw)
+
+        label = data.get("label", "neutral").lower()
+        if label not in ("negative", "neutral", "positive"):
+            label = "neutral"
+
+        score = float(data.get("score", 0.0))
+        score = max(-1.0, min(1.0, score))
+
+        return Sentiment(score=score, label=label)
+
+    except Exception as exc:
+        log.warning("Sentiment analysis failed: %s — returning neutral", exc)
+        return Sentiment(score=0.0, label="neutral")

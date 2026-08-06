@@ -1,32 +1,23 @@
 """
-Interpreter Agent.
+Interpreter Agent — LLM-based (Hugging Face router, OpenAI-compatible).
 
-Predicts (intent, customer_tag) from a transcript chunk.
-
-Two modes:
-  - "finetuned": loads two heads fine-tuned on the dataset (one per label set).
-                 Set INTERPRETER_MODE=finetuned and provide INTERPRETER_INTENT_DIR /
-                 INTERPRETER_CTAG_DIR (paths to saved model dirs).
-  - "zeroshot":  uses an NLI model (DeBERTa-v3 NLI by default) for zero-shot
-                 classification over the fixed label sets. Default mode so the
-                 system runs out of the box.
+Uses the same LLM endpoint that's already working for the main chat.
+Sends a structured prompt asking for JSON with intent + customer_tag.
+No separate model or API endpoint needed.
 """
 
 from __future__ import annotations
 
-import os
-from functools import lru_cache
+import json
+import logging
+import re
 
-import torch
-from transformers import (
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    pipeline,
-)
+import httpx
 
 from app.core.config import settings
 from app.core.schemas import Interpretation
 
+log = logging.getLogger(__name__)
 
 INTENTS: list[str] = [
     "Returns_and_Refunds", "Technical_Issues", "Upgrades_and_Promotions",
@@ -48,91 +39,92 @@ CUSTOMER_TAGS: list[str] = [
     "CUSTOMER_THREATENS_CHURN",
 ]
 
+_SYSTEM = (
+    "You are a classification engine. Respond ONLY with a valid JSON object — "
+    "no markdown, no explanation."
+)
 
-def _device_index() -> int:
-    return 0 if (settings.device == "cuda" and torch.cuda.is_available()) else -1
+_USER_TMPL = """\
+Classify the following customer message.
 
+Return exactly this JSON structure:
+{{
+  "intent": "<one of the intents below>",
+  "intent_confidence": <float 0.0-1.0>,
+  "customer_tag": "<one of the tags below>",
+  "customer_tag_confidence": <float 0.0-1.0>
+}}
 
-@lru_cache(maxsize=1)
-def _zeroshot():
-    nli_model = os.getenv("INTERPRETER_NLI_MODEL", "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli")
-    return pipeline("zero-shot-classification", model=nli_model, device=_device_index())
+Valid intents: {intents}
+Valid customer tags: {tags}
 
-
-def _humanize(label: str) -> str:
-    return label.replace("CUSTOMER_", "").replace("_", " ").lower()
-
-
-_CTAG_HUMAN_TO_RAW = {_humanize(t): t for t in CUSTOMER_TAGS}
-
-
-@lru_cache(maxsize=1)
-def _finetuned():
-    intent_dir = os.getenv("INTERPRETER_INTENT_DIR")
-    ctag_dir = os.getenv("INTERPRETER_CTAG_DIR")
-    if not intent_dir or not ctag_dir:
-        raise RuntimeError("Set INTERPRETER_INTENT_DIR and INTERPRETER_CTAG_DIR for finetuned mode")
-    device = "cuda" if (settings.device == "cuda" and torch.cuda.is_available()) else "cpu"
-
-    tok_i = AutoTokenizer.from_pretrained(intent_dir)
-    mdl_i = AutoModelForSequenceClassification.from_pretrained(intent_dir).to(device).eval()
-    tok_c = AutoTokenizer.from_pretrained(ctag_dir)
-    mdl_c = AutoModelForSequenceClassification.from_pretrained(ctag_dir).to(device).eval()
-    return (tok_i, mdl_i, tok_c, mdl_c, device)
+Customer message:
+\"{text}\"
+"""
 
 
-def _classify_finetuned(text: str) -> Interpretation:
-    tok_i, mdl_i, tok_c, mdl_c, device = _finetuned()
-
-    with torch.no_grad():
-        ei = tok_i(text, truncation=True, max_length=256, return_tensors="pt").to(device)
-        oi = mdl_i(**ei).logits.softmax(-1)[0]
-        ii = int(oi.argmax().item())
-        intent = mdl_i.config.id2label.get(ii, INTENTS[ii] if ii < len(INTENTS) else "UNKNOWN")
-        intent_conf = float(oi[ii].item())
-
-        ec = tok_c(text, truncation=True, max_length=256, return_tensors="pt").to(device)
-        oc = mdl_c(**ec).logits.softmax(-1)[0]
-        ic = int(oc.argmax().item())
-        ctag = mdl_c.config.id2label.get(ic, CUSTOMER_TAGS[ic] if ic < len(CUSTOMER_TAGS) else "CUSTOMER_OTHER")
-        ctag_conf = float(oc[ic].item())
-
-    return Interpretation(
-        intent=intent,
-        customer_tag=ctag,
-        intent_confidence=intent_conf,
-        customer_tag_confidence=ctag_conf,
-    )
+def _call_llm(prompt: str) -> str:
+    url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
+    payload = {
+        "model": settings.llm_model,
+        "messages": [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 120,
+        "temperature": 0.0,
+    }
+    with httpx.Client(timeout=60.0) as client:
+        r = client.post(url, json=payload, headers=headers)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def _classify_zeroshot(text: str) -> Interpretation:
-    zs = _zeroshot()
-
-    intent_labels = [i.replace("_", " ") for i in INTENTS]
-    r1 = zs(text, candidate_labels=intent_labels, multi_label=False,
-            hypothesis_template="The customer is calling about {}.")
-    raw_intent = INTENTS[intent_labels.index(r1["labels"][0])]
-    intent_conf = float(r1["scores"][0])
-
-    ctag_labels = [_humanize(t) for t in CUSTOMER_TAGS]
-    r2 = zs(text, candidate_labels=ctag_labels, multi_label=False,
-            hypothesis_template="The customer {}.")
-    ctag = _CTAG_HUMAN_TO_RAW[r2["labels"][0]]
-    ctag_conf = float(r2["scores"][0])
-
-    return Interpretation(
-        intent=raw_intent,
-        customer_tag=ctag,
-        intent_confidence=intent_conf,
-        customer_tag_confidence=ctag_conf,
-    )
+def _extract_json(text: str) -> dict:
+    """Extract JSON from model output, stripping any surrounding markdown fences."""
+    # Strip ```json ... ``` fences if present
+    text = re.sub(r"^```[a-z]*\n?", "", text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"\n?```$", "", text.strip())
+    return json.loads(text)
 
 
 def interpret(text: str) -> Interpretation:
     text = (text or "").strip()
     if not text:
         return Interpretation(intent="General Inquiry", customer_tag="CUSTOMER_OTHER")
-    mode = os.getenv("INTERPRETER_MODE", "zeroshot").lower()
-    if mode == "finetuned":
-        return _classify_finetuned(text)
-    return _classify_zeroshot(text)
+
+    prompt = _USER_TMPL.format(
+        intents=", ".join(INTENTS),
+        tags=", ".join(CUSTOMER_TAGS),
+        text=text,
+    )
+
+    try:
+        raw = _call_llm(prompt)
+        data = _extract_json(raw)
+
+        # Validate / clamp values
+        intent = data.get("intent", "General Inquiry")
+        if intent not in INTENTS:
+            intent = "General Inquiry"
+
+        ctag = data.get("customer_tag", "CUSTOMER_OTHER")
+        if ctag not in CUSTOMER_TAGS:
+            ctag = "CUSTOMER_OTHER"
+
+        return Interpretation(
+            intent=intent,
+            customer_tag=ctag,
+            intent_confidence=float(data.get("intent_confidence", 0.8)),
+            customer_tag_confidence=float(data.get("customer_tag_confidence", 0.8)),
+        )
+
+    except Exception as exc:
+        log.warning("Intent classification failed: %s — using fallback", exc)
+        return Interpretation(
+            intent="General Inquiry",
+            customer_tag="CUSTOMER_OTHER",
+            intent_confidence=0.0,
+            customer_tag_confidence=0.0,
+        )

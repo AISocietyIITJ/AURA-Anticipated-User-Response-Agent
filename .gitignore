@@ -11,6 +11,7 @@ venv/
 .pytest_cache/
 
 # data — too big and proprietary
+data/
 data/*.json
 data/*.csv
 

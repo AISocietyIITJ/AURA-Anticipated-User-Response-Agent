@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Co-pilot</title>
+<title>Customer Care Agent</title>
 <style>
   :root {
     --bg-0: #0a0c14;
@@ -265,7 +265,7 @@
       <div class="empty">
         <div>
           <h2>Press the mic and start the call.</h2>
-          <div>I'll transcribe what the customer says, then suggest your next move.</div>
+          <div>I'll transcribe what the customer says, then provide the bot's response.</div>
           <div class="hint">No mic? Type a customer line below and hit <code>Send</code>.</div>
         </div>
       </div>
@@ -314,7 +314,7 @@
       </svg>
     </button>
     <div class="input">
-      <input id="text-in" type="text" placeholder="Or type what the customer said..." autocomplete="off" />
+      <input id="text-in" type="text" placeholder="Click the mic button to start the conversation. Or chat with our agent." autocomplete="off" />
       <button id="send-btn">Send</button>
       <button id="reset-btn" class="secondary" title="Clear conversation">Reset</button>
     </div>
@@ -403,7 +403,7 @@ function renderResponse(turnEl, data) {
 
   const sug = document.createElement("div");
   sug.className = "suggest";
-  sug.innerHTML = `<div class="label">Suggested next move</div><div class="body"></div>`;
+  sug.innerHTML = `<div class="label">Agent Response</div><div class="body"></div>`;
   sug.querySelector(".body").textContent = data.suggested_reply;
   turnEl.appendChild(sug);
 
