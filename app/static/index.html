@@ -498,7 +498,19 @@ let audioChunks = [];
 let userWantsListening = false;
 
 function sendAudioAndReset(audioBlob) {
-  if (!activeUserBubble) return;
+  console.log("[AURA-MIC] sendAudioAndReset called, blob size:", audioBlob.size, "type:", audioBlob.type);
+  if (!activeUserBubble) {
+    console.warn("[AURA-MIC] sendAudioAndReset: activeUserBubble is null, aborting");
+    return;
+  }
+  if (audioBlob.size === 0) {
+    console.warn("[AURA-MIC] sendAudioAndReset: blob is empty, aborting");
+    activeUserBubble.querySelector(".text").textContent = "(No audio captured)";
+    activeUserBubble.querySelector(".text").classList.remove("transcribing");
+    activeUserBubble = null;
+    setStatus("idle");
+    return;
+  }
 
   const sug = document.createElement("div");
   sug.className = "suggest loading";
@@ -507,9 +519,13 @@ function sendAudioAndReset(audioBlob) {
   setStatus("processing…");
 
   const formData = new FormData();
-  // Provide a generic audio filename. The backend will figure it out or pass it to Nvidia NIM
-  formData.append("file", audioBlob, "audio.webm");
+  // Use the actual MIME type from the recorder for the filename extension
+  const mimeType = audioBlob.type || "audio/webm";
+  const ext = mimeType.includes("webm") ? "webm" : mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "m4a" : "wav";
+  formData.append("file", audioBlob, "recording." + ext);
   formData.append("conversation_id", conversationId);
+
+  console.log("[AURA-MIC] Uploading to /audio, blob size:", audioBlob.size, "mimeType:", mimeType, "ext:", ext);
 
   const bubble = activeUserBubble;
   activeUserBubble = null;
@@ -519,27 +535,34 @@ function sendAudioAndReset(audioBlob) {
     body: formData,
   })
     .then((r) => {
+      console.log("[AURA-MIC] /audio response status:", r.status);
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     })
     .then((data) => {
+      console.log("[AURA-MIC] /audio success, transcribed text:", data.state?.text);
       sug.remove();
-      // Replace the "Listening…" placeholder with the actual transcribed text from state
       bubble.querySelector(".text").classList.remove("transcribing");
       bubble.querySelector(".text").textContent = data.state.text;
       renderResponse(bubble, data);
       setStatus("ready");
     })
     .catch((e) => {
+      console.error("[AURA-MIC] /audio fetch error:", e);
       sug.classList.remove("loading");
       sug.querySelector(".label").textContent = "Error";
       sug.querySelector(".body").textContent = e.message;
       setStatus("error");
       bubble.querySelector(".text").textContent = "(Audio failed to process)";
+      bubble.querySelector(".text").classList.remove("transcribing");
     });
 }
 
-if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+/* ---- feature detection ---- */
+const micSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+console.log("[AURA-MIC] MediaDevices supported:", micSupported);
+
+if (!micSupported) {
   micBtn.disabled = true;
   micBtn.title = "Audio recording not supported in this browser.";
   micBtn.style.opacity = 0.4;
@@ -547,43 +570,86 @@ if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
 }
 
 micBtn.addEventListener("click", async () => {
+  console.log("[AURA-MIC] Mic button clicked. userWantsListening:", userWantsListening);
+
   if (userWantsListening) {
-    // Stop recording
+    /* ---- STOP recording ---- */
+    console.log("[AURA-MIC] Stopping recording. mediaRecorder state:", mediaRecorder?.state);
     userWantsListening = false;
     micBtn.classList.remove("live");
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
-      mediaRecorder.stop();
+    try {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+        console.log("[AURA-MIC] mediaRecorder.stop() called");
+      } else {
+        console.warn("[AURA-MIC] mediaRecorder was null or already inactive");
+      }
+    } catch (stopErr) {
+      console.error("[AURA-MIC] Error calling stop():", stopErr);
     }
   } else {
-    // Start recording
+    /* ---- START recording ---- */
+    console.log("[AURA-MIC] Starting recording…");
     try {
       audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(audioStream);
+      console.log("[AURA-MIC] getUserMedia succeeded, tracks:", audioStream.getAudioTracks().length);
+
+      // Pick a supported MIME type
+      let mimeType = "";
+      for (const candidate of ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", ""]) {
+        if (!candidate || MediaRecorder.isTypeSupported(candidate)) {
+          mimeType = candidate;
+          break;
+        }
+      }
+      console.log("[AURA-MIC] Using MIME type:", mimeType || "(browser default)");
+
+      const options = mimeType ? { mimeType } : undefined;
+      mediaRecorder = new MediaRecorder(audioStream, options);
       audioChunks = [];
-      
+
       mediaRecorder.ondataavailable = (e) => {
+        console.log("[AURA-MIC] ondataavailable, chunk size:", e.data.size);
         if (e.data.size > 0) audioChunks.push(e.data);
       };
-      
+
       mediaRecorder.onstop = () => {
-        // When stopped, send the blob
-        const blob = new Blob(audioChunks);
-        audioStream.getTracks().forEach((t) => t.stop());
+        console.log("[AURA-MIC] onstop fired. Total chunks:", audioChunks.length);
+        const blobType = mediaRecorder.mimeType || mimeType || "audio/webm";
+        const blob = new Blob(audioChunks, { type: blobType });
+        console.log("[AURA-MIC] Created blob, size:", blob.size, "type:", blob.type);
+        // Release mic
+        try { audioStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
         sendAudioAndReset(blob);
       };
-      
-      mediaRecorder.start();
+
+      mediaRecorder.onerror = (ev) => {
+        console.error("[AURA-MIC] MediaRecorder error:", ev.error);
+        userWantsListening = false;
+        micBtn.classList.remove("live");
+        setStatus("recording error");
+        try { audioStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+      };
+
+      // Use a timeslice so ondataavailable fires periodically (every 1s)
+      // instead of only once at stop — more robust across browsers.
+      mediaRecorder.start(1000);
+      console.log("[AURA-MIC] mediaRecorder.start(1000) called, state:", mediaRecorder.state);
+
       userWantsListening = true;
       micBtn.classList.add("live");
       setStatus("listening…", true);
-      
+
       if (!activeUserBubble) {
         activeUserBubble = renderUserTurn("Listening…", true);
       }
     } catch (e) {
+      console.error("[AURA-MIC] getUserMedia / start error:", e);
       userWantsListening = false;
       micBtn.classList.remove("live");
       setStatus("mic error: " + e.message);
+      // Release stream if it was obtained before the error
+      if (audioStream) { try { audioStream.getTracks().forEach((t) => t.stop()); } catch (_) {} }
     }
   }
 });

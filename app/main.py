@@ -111,7 +111,9 @@ async def audio(
     conversation_id: str | None = Form(default=None),
     file: UploadFile = File(...),
 ):
+    log.info("/audio endpoint hit — filename=%s, content_type=%s", file.filename, file.content_type)
     raw = await file.read()
+    log.info("Audio file read, %d bytes", len(raw))
     text = await asyncio.to_thread(stt.transcribe, raw)
     if not text.strip():
         raise HTTPException(status_code=422, detail="empty transcription")
