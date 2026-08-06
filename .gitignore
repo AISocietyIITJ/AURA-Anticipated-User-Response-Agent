@@ -9,6 +9,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+Procfile 
 
 # data — too big and proprietary
 data/
