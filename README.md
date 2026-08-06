@@ -3,8 +3,8 @@
 Real-time co-pilot for human customer-care agents on live calls.
 
 ## Hosted Application
-- **Live Demo:** [website-link-placeholder]
-- **Original Repository:** [original-repo-placeholder]
+- **Live Demo:** [https://aura-anticipated-user-response-agent.onrender.com]
+- **Original Repository:** [https://github.com/aquaphoenix69-prog/copilot]
 
 Pipeline matches the project diagram:
 
