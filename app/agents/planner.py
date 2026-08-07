@@ -132,37 +132,30 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
     ctag = state.customer_tag
     bucket = _bucket(state.sentiment.score)
 
-    used_fallback = False
-    rationale_parts: list[str] = []
+    def get_plan() -> tuple[dict | None, float, list[str]]:
+        r = _query_exact(intent, ctag, bucket)
+        if r:
+            c, _ = compute_confidence(r)
+            if c >= CONFIDENCE_THRESHOLD:
+                return r, c, [f"Matched state {intent}|{ctag}|{bucket}"]
 
-    res = _query_exact(intent, ctag, bucket)
-    if res:
-        confidence, stats = compute_confidence(res)
-        if confidence >= CONFIDENCE_THRESHOLD:
-            rationale_parts.append(f"Matched state {intent}|{ctag}|{bucket}")
-        else:
-            res = None
+        r = _query_by_intent_ctag(intent, ctag)
+        if r:
+            c, _ = compute_confidence(r)
+            if c >= CONFIDENCE_THRESHOLD:
+                return r, c, [f"Backed off to ({intent}, {ctag}) ignoring sentiment"]
 
-    if not res:
-        res = _query_by_intent_ctag(intent, ctag)
-        if res:
-            confidence, stats = compute_confidence(res)
-            if confidence >= CONFIDENCE_THRESHOLD:
-                rationale_parts.append(f"Backed off to ({intent}, {ctag}) ignoring sentiment")
-            else:
-                res = None
+        r = _query_by_intent(intent)
+        if r:
+            c, _ = compute_confidence(r)
+            if c >= CONFIDENCE_THRESHOLD:
+                return r, c, [f"Backed off to intent={intent} only"]
 
-    if not res:
-        res = _query_by_intent(intent)
-        if res:
-            confidence, stats = compute_confidence(res)
-            if confidence >= CONFIDENCE_THRESHOLD:
-                rationale_parts.append(f"Backed off to intent={intent} only")
-            else:
-                res = None
+        return None, 0.0, []
+
+    res, final_confidence, rationale_parts = get_plan()
 
     if not res:
-        used_fallback = True
         return PlannerSuggestion(
             next_agent_tags=[],
             expected_outcome=None,
@@ -170,6 +163,9 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
             rationale=f"No graph match for ({intent}, {ctag}, {bucket}); using LLM fallback.",
             used_fallback=True,
         )
+
+    # We now guarantee `res` is valid and `final_confidence` >= CONFIDENCE_THRESHOLD
+    confidence = final_confidence
     tags = sorted(res["tags"], key=lambda t: t.get("count") or 0, reverse=True)[:top_k]
     total = sum(t.get("count") or 0 for t in tags) or 1
     top = [t["tag"] for t in tags]
@@ -188,5 +184,5 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
         expected_outcome=expected_outcome,
         confidence=float(confidence),
         rationale="; ".join(rationale_parts),
-        used_fallback=used_fallback,
+        used_fallback=False,
     )
