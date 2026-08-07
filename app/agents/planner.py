@@ -141,8 +141,9 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
         if confidence >= CONFIDENCE_THRESHOLD:
             rationale_parts.append(f"Matched state {intent}|{ctag}|{bucket}")
         else:
-            res=None
-    else:
+            res = None
+
+    if not res:
         res = _query_by_intent_ctag(intent, ctag)
         if res:
             confidence, stats = compute_confidence(res)
@@ -150,14 +151,15 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
                 rationale_parts.append(f"Backed off to ({intent}, {ctag}) ignoring sentiment")
             else:
                 res = None
-        else:
-            res = _query_by_intent(intent)
-            if res:
-                confidence, stats = compute_confidence(res)
-                if confidence >= CONFIDENCE_THRESHOLD:
-                    rationale_parts.append(f"Backed off to intent={intent} only")
-                else:
-                    res = None
+
+    if not res:
+        res = _query_by_intent(intent)
+        if res:
+            confidence, stats = compute_confidence(res)
+            if confidence >= CONFIDENCE_THRESHOLD:
+                rationale_parts.append(f"Backed off to intent={intent} only")
+            else:
+                res = None
 
     if not res:
         used_fallback = True
