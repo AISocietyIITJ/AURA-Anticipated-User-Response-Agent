@@ -88,6 +88,44 @@ def _resolved_share(outcomes: list[dict]) -> float:
     resolved = sum((o.get("count") or 0) for o in outcomes if o.get("outcome") == "OUTCOME_RESOLVED")
     return resolved / total
 
+CONFIDENCE_THRESHOLD = 0.4
+
+def compute_confidence(res: dict) -> tuple[float, dict]:
+
+    tags = sorted(
+        res["tags"],
+        key=lambda t: t.get("count") or 0,
+        reverse=True,
+    )
+    if not tags:
+        return 0.0, {
+            "consensus": 0.0,
+            "resolved_share": None,
+        }
+    total = sum(t.get("count") or 0 for t in tags)
+    consensus = (
+        tags[0]["count"] / total
+        if total > 0
+        else 0.0
+    )
+    outcomes = res.get("outcomes", [])
+    if outcomes:
+        resolved_share = _resolved_share(outcomes)
+
+        confidence = (
+            0.7 * resolved_share +
+            0.3 * consensus
+        )
+    else:
+        resolved_share = None
+
+        confidence = consensus
+
+    return confidence, {
+        "consensus": consensus,
+        "resolved_share": resolved_share,
+    }
+
 
 def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
     intent = state.intent
@@ -99,15 +137,27 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
 
     res = _query_exact(intent, ctag, bucket)
     if res:
-        rationale_parts.append(f"Matched state {intent}|{ctag}|{bucket}")
+        confidence, stats = compute_confidence(res)
+        if confidence >= CONFIDENCE_THRESHOLD:
+            rationale_parts.append(f"Matched state {intent}|{ctag}|{bucket}")
+        else:
+            res=None
     else:
         res = _query_by_intent_ctag(intent, ctag)
         if res:
-            rationale_parts.append(f"Backed off to ({intent}, {ctag}) ignoring sentiment")
+            confidence, stats = compute_confidence(res)
+            if confidence >= CONFIDENCE_THRESHOLD:
+                rationale_parts.append(f"Backed off to ({intent}, {ctag}) ignoring sentiment")
+            else:
+                res = None
         else:
             res = _query_by_intent(intent)
             if res:
-                rationale_parts.append(f"Backed off to intent={intent} only")
+                confidence, stats = compute_confidence(res)
+                if confidence >= CONFIDENCE_THRESHOLD:
+                    rationale_parts.append(f"Backed off to intent={intent} only")
+                else:
+                    res = None
 
     if not res:
         used_fallback = True
@@ -118,11 +168,10 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
             rationale=f"No graph match for ({intent}, {ctag}, {bucket}); using LLM fallback.",
             used_fallback=True,
         )
-
     tags = sorted(res["tags"], key=lambda t: t.get("count") or 0, reverse=True)[:top_k]
     total = sum(t.get("count") or 0 for t in tags) or 1
     top = [t["tag"] for t in tags]
-    confidence = (tags[0]["count"] / total) if tags else 0.0
+    #confidence = (tags[0]["count"] / total) if tags else 0.0
 
     outcomes = sorted(res["outcomes"], key=lambda o: o.get("count") or 0, reverse=True)
     expected_outcome = outcomes[0]["outcome"] if outcomes else None
