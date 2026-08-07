@@ -88,7 +88,7 @@ def _resolved_share(outcomes: list[dict]) -> float:
     resolved = sum((o.get("count") or 0) for o in outcomes if o.get("outcome") == "OUTCOME_RESOLVED")
     return resolved / total
 
-CONFIDENCE_THRESHOLD = 0.4
+CONFIDENCE_THRESHOLD = 0.3
 
 def compute_confidence(res: dict) -> tuple[float, dict]:
 
