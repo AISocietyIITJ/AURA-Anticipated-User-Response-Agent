@@ -9,3 +9,7 @@ python-multipart==0.0.12
 soundfile==0.12.1
 # STT: NVIDIA Parakeet TDT 0.6B v2 via Riva gRPC (grpc.nvcf.nvidia.com:443)
 nvidia-riva-client
+# Audio decoding: PyAV handles WebM/Opus from browser MediaRecorder (bundled FFmpeg)
+av
+numpy
+
