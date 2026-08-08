@@ -6,10 +6,9 @@ pydantic-settings==2.5.2
 neo4j==5.24.0
 httpx==0.27.2
 python-multipart==0.0.12
-soundfile==0.12.1
 # STT: NVIDIA Parakeet TDT 0.6B v2 via Riva gRPC (grpc.nvcf.nvidia.com:443)
 nvidia-riva-client
-# Audio decoding: PyAV handles WebM/Opus from browser MediaRecorder (bundled FFmpeg)
+# Audio decoding: PyAV (bundled FFmpeg) handles WebM/Opus from browser MediaRecorder
 av
 numpy
 
