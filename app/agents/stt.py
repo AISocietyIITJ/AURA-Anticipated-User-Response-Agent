@@ -1,13 +1,15 @@
 """
-Speech-to-text using NVIDIA NIM Parakeet-TDT-0.6B-v2 (cloud API).
+Speech-to-text using NVIDIA Parakeet-TDT-0.6B-v2 via Riva gRPC (NVCF).
 
-Sends audio to the NVIDIA NIM endpoint at:
-  https://integrate.api.nvidia.com/v1/audio/transcriptions
+Uses the official nvidia-riva-client library to call:
+  grpc.nvcf.nvidia.com:443
 
-The endpoint is OpenAI-compatible (multipart/form-data upload).
+This is the canonical, stable interface documented at:
+  https://build.nvidia.com/nvidia/parakeet-tdt-0_6b-v2
+
 No local model is loaded — everything runs in NVIDIA's cloud.
 
-Audio in: raw bytes (wav/flac/mp3/ogg) or a file path.
+Audio in: raw bytes (wav/flac/mp3/ogg) or a filesystem path.
 Text out: transcription string.
 """
 
@@ -16,88 +18,118 @@ from __future__ import annotations
 import io
 import logging
 
-import httpx
 import soundfile as sf
+import riva.client
 
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
-_NVIDIA_STT_URL = "https://integrate.api.nvidia.com/v1/audio/transcriptions"
-_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
+# NVCF function-id for nvidia/parakeet-tdt-0.6b-v2
+# Source: https://build.nvidia.com/nvidia/parakeet-tdt-0_6b-v2/api
+_NVCF_FUNCTION_ID = "d3fe9151-442b-4204-a70d-5fcc597fd610"
+_GRPC_ENDPOINT = "grpc.nvcf.nvidia.com:443"
+_SAMPLE_RATE_HZ = 16_000  # Parakeet expects 16 kHz mono
 
 
-def _ensure_wav_bytes(audio: bytes) -> tuple[bytes, str]:
+def _to_wav_pcm16_mono(audio: bytes) -> bytes:
     """
-    Re-encode audio bytes to WAV PCM-16 if necessary.
-    Returns (wav_bytes, filename_hint).
+    Re-encode arbitrary audio bytes to 16-bit mono WAV at 16 kHz.
+
+    Parakeet TDT via Riva expects LINEAR_PCM 16-bit mono. We normalise
+    here so that browser-recorded WebM/Opus, MP3, etc. all work reliably.
     """
     try:
         arr, sr = sf.read(io.BytesIO(audio), dtype="float32")
+        # Mix down to mono
         if arr.ndim > 1:
             arr = arr.mean(axis=1)
+        # Resample to 16 kHz if needed (simple decimation/interpolation via soundfile)
+        if sr != _SAMPLE_RATE_HZ:
+            import numpy as np
+            from fractions import Fraction
+            ratio = Fraction(_SAMPLE_RATE_HZ, sr).limit_denominator(100)
+            # Use scipy if available, otherwise write at original sr (Riva can handle it)
+            try:
+                from scipy.signal import resample_poly
+                arr = resample_poly(arr, ratio.numerator, ratio.denominator)
+            except ImportError:
+                pass  # fall through and send at original sr
+
         buf = io.BytesIO()
-        sf.write(buf, arr, sr, format="WAV", subtype="PCM_16")
+        sf.write(buf, arr, _SAMPLE_RATE_HZ, format="WAV", subtype="PCM_16")
         buf.seek(0)
-        return buf.read(), "audio.wav"
-    except Exception:
-        # Pass through as-is; let the API handle the codec
-        return audio, "audio.wav"
+        return buf.read()
+    except Exception as exc:
+        log.warning("Audio re-encoding failed (%s); passing raw bytes to Riva", exc)
+        return audio
 
 
-def transcribe(audio: bytes | str, sample_rate: int = 16000) -> str:
+def _build_auth(api_key: str) -> riva.client.Auth:
+    """Return a Riva Auth object pointed at the NVCF cloud endpoint."""
+    return riva.client.Auth(
+        uri=_GRPC_ENDPOINT,
+        use_ssl=True,
+        metadata_args=[
+            ["function-id", _NVCF_FUNCTION_ID],
+            ["authorization", f"Bearer {api_key}"],
+        ],
+    )
+
+
+def transcribe(audio: bytes | str, sample_rate: int = 16_000) -> str:
     """
-    Transcribe audio using the NVIDIA NIM cloud API.
+    Transcribe audio using the NVIDIA Parakeet TDT 0.6B v2 cloud model
+    via the Riva gRPC interface on grpc.nvcf.nvidia.com:443.
 
     Parameters
     ----------
     audio:
-        Either raw audio bytes (any common format) or a filesystem path to
-        an audio file.
+        Either raw audio bytes (any common format: wav/webm/ogg/mp3/flac)
+        or a filesystem path to an audio file.
     sample_rate:
-        Ignored when audio is bytes (sr is read from the file header).
-        Only used when audio is a raw numpy array (not supported here).
+        Hint used only when audio is already raw PCM bytes without a header.
 
     Returns
     -------
     str
-        The transcribed text, or "" on empty response.
+        The transcribed text, or "" on an empty response.
     """
     api_key = settings.stt_api_key
     if not api_key:
-        raise RuntimeError("STT_API_KEY is not set. Add it to your .env file.")
+        raise RuntimeError("STT_API_KEY is not set. Add it to your .env / Render env vars.")
 
-    headers = {"Authorization": f"Bearer {api_key}"}
-
+    # --- Load audio bytes ---
     if isinstance(audio, str):
-        # File path — read it
         with open(audio, "rb") as fh:
             raw = fh.read()
-        fname = audio.split("/")[-1] or "audio.wav"
-        audio_bytes = raw
     else:
-        audio_bytes, fname = _ensure_wav_bytes(audio)
+        raw = audio
 
-    files = {"file": (fname, audio_bytes, "audio/wav")}
-    data = {"model": _MODEL}
+    log.debug("Received %d raw audio bytes for transcription", len(raw))
 
-    log.debug("Sending %d bytes of audio to NVIDIA NIM STT", len(audio_bytes))
+    # --- Normalise to 16-bit mono WAV at 16 kHz ---
+    wav_bytes = _to_wav_pcm16_mono(raw)
+    log.debug("Sending %d bytes (normalised WAV) to Riva NVCF endpoint", len(wav_bytes))
 
-    with httpx.Client(timeout=120.0) as client:
-        r = client.post(_NVIDIA_STT_URL, headers=headers, files=files, data=data)
+    # --- Build Riva auth + ASR service ---
+    auth = _build_auth(api_key)
+    asr_service = riva.client.ASRService(auth)
 
-    if r.status_code != 200:
-        log.error("NVIDIA STT error %s: %s", r.status_code, r.text)
-        r.raise_for_status()
+    # --- Configure recognition ---
+    config = riva.client.RecognitionConfig(
+        language_code="en-US",
+        max_alternatives=1,
+        enable_automatic_punctuation=True,
+    )
 
-    resp = r.json()
+    # --- Offline (batch) recognition call ---
+    response = asr_service.offline_recognize(wav_bytes, config)
 
-    # OpenAI-compatible response: {"text": "..."}
-    text = resp.get("text", "")
-    if not text and "results" in resp:
-        # Some NVIDIA endpoints wrap in a results list
-        results = resp["results"]
-        if results:
-            text = results[0].get("transcript", "")
+    if not response.results:
+        log.warning("Riva returned no results for the submitted audio")
+        return ""
 
-    return (text or "").strip()
+    transcript = response.results[0].alternatives[0].transcript
+    log.info("Transcription: %r", transcript)
+    return transcript.strip()
