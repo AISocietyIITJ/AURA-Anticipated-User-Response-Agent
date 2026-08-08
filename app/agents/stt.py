@@ -117,7 +117,12 @@ def transcribe(audio: bytes | str, sample_rate: int = 16_000) -> str:
     asr_service = riva.client.ASRService(auth)
 
     # --- Configure recognition ---
+    # encoding, sample_rate_hertz, and audio_channel_count MUST be set explicitly;
+    # Triton cannot auto-detect them even from a valid WAV header.
     config = riva.client.RecognitionConfig(
+        encoding=riva.client.AudioEncoding.LINEAR_PCM,
+        sample_rate_hertz=_SAMPLE_RATE_HZ,
+        audio_channel_count=1,
         language_code="en-US",
         max_alternatives=1,
         enable_automatic_punctuation=True,
