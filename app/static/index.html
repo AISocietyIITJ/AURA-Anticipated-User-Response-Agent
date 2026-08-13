@@ -35,11 +35,47 @@
 
   .app {
     display: grid;
-    grid-template-columns: 1fr 380px;
+    grid-template-columns: 260px 1fr 380px;
     grid-template-rows: 56px 1fr 96px;
     height: 100vh;
     gap: 0;
   }
+
+  .history-sidebar {
+    grid-column: 1;
+    grid-row: 2 / -1;
+    border-right: 1px solid var(--line);
+    background: rgba(255,255,255,0.015);
+    display: flex; flex-direction: column;
+    padding: 18px 14px;
+    overflow-y: auto;
+  }
+  .history-sidebar h3 {
+    margin: 0 0 12px 6px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-mute);
+  }
+  .new-chat-btn {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid var(--accent);
+    background: rgba(124,92,255,0.1);
+    color: var(--accent);
+    border-radius: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: 20px;
+    transition: background 0.2s;
+  }
+  .new-chat-btn:hover { background: rgba(124,92,255,0.18); }
+  .history-list { display: flex; flex-direction: column; gap: 4px; }
+  .history-item {
+    padding: 10px 12px; border-radius: 8px; cursor: pointer;
+    color: var(--fg-dim); font-size: 14px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; border: 1px solid transparent;
+    transition: background 0.2s, color 0.2s;
+  }
+  .history-item:hover { background: rgba(255,255,255,0.04); color: var(--fg); }
+  .history-item.active { background: rgba(124,92,255,0.12); border-color: rgba(124,92,255,0.3); color: var(--fg); }
 
   header {
     grid-column: 1 / -1;
@@ -70,7 +106,7 @@
   .status.live .dot { background: var(--pos); box-shadow: 0 0 10px var(--pos); animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: 0.45; } }
 
-  main { overflow-y: auto; padding: 24px 28px; }
+  main { grid-column: 2; grid-row: 2; overflow-y: auto; padding: 24px 28px; }
   .conversation {
     max-width: 760px; margin: 0 auto;
     display: flex; flex-direction: column; gap: 14px;
@@ -137,6 +173,8 @@
   @keyframes blink { 50% { opacity: 0; } }
 
   aside {
+    grid-column: 3;
+    grid-row: 2 / -1;
     border-left: 1px solid var(--line);
     overflow-y: auto;
     padding: 20px 18px;
@@ -182,7 +220,8 @@
   .action-name .pct { color: var(--fg-mute); font-variant-numeric: tabular-nums; }
 
   footer {
-    grid-column: 1 / -1;
+    grid-column: 2;
+    grid-row: 3;
     border-top: 1px solid var(--line);
     background: rgba(10,12,20,0.6);
     backdrop-filter: blur(14px);
@@ -248,8 +287,11 @@
   .hint code { background: var(--bg-1); padding: 2px 6px; border-radius: 4px; color: var(--fg-dim); }
 
   @media (max-width: 880px) {
-    .app { grid-template-columns: 1fr; grid-template-rows: 56px auto auto auto; }
-    aside { border-left: 0; border-top: 1px solid var(--line); max-height: 320px; }
+    .app { grid-template-columns: 1fr; grid-template-rows: 56px auto auto auto auto; }
+    .history-sidebar { grid-column: 1; grid-row: 2; border-right: 0; border-bottom: 1px solid var(--line); max-height: 200px; }
+    main { grid-column: 1; grid-row: 3; }
+    aside { grid-column: 1; grid-row: 4; border-left: 0; border-top: 1px solid var(--line); max-height: 320px; }
+    footer { grid-column: 1; grid-row: 5; }
   }
 </style>
 </head>
@@ -259,6 +301,12 @@
     <div class="brand"><div class="brand-dot"></div><span>Customer-Care Co-pilot</span></div>
     <div id="status" class="status"><div class="dot"></div><span id="status-text">idle</span></div>
   </header>
+
+  <nav class="history-sidebar">
+    <button class="new-chat-btn" id="new-chat-btn">+ New Conversation</button>
+    <h3>Recent Calls</h3>
+    <div class="history-list" id="history-list"></div>
+  </nav>
 
   <main>
     <div class="conversation" id="conv">
@@ -322,7 +370,54 @@
 </div>
 
 <script>
-const conversationId = "ui-" + Math.random().toString(36).slice(2, 10);
+let conversationId = null;
+const DB_KEY = "aura_chat_sessions";
+let sessions = JSON.parse(localStorage.getItem(DB_KEY) || "[]");
+let activeSessionId = null;
+
+function saveSessions() {
+  localStorage.setItem(DB_KEY, JSON.stringify(sessions));
+}
+
+function initSession(id) {
+  if (!sessions.find(s => s.id === id)) {
+    sessions.unshift({ id, title: "New Conversation", turns: [] });
+    if (sessions.length > 50) sessions.pop(); // limit to 50
+    saveSessions();
+  }
+  activeSessionId = id;
+  renderSidebar();
+}
+
+function updateSessionTitle(title) {
+  const s = sessions.find(s => s.id === activeSessionId);
+  if (s && s.title === "New Conversation") {
+    s.title = title.length > 30 ? title.slice(0, 30) + "..." : title;
+    saveSessions();
+    renderSidebar();
+  }
+}
+
+function addTurnToHistory(type, data) {
+  const s = sessions.find(s => s.id === activeSessionId);
+  if (s) {
+    s.turns.push({ type, data });
+    saveSessions();
+  }
+}
+
+function renderSidebar() {
+  const hl = document.getElementById("history-list");
+  hl.innerHTML = "";
+  sessions.forEach(s => {
+    const d = document.createElement("div");
+    d.className = "history-item" + (s.id === activeSessionId ? " active" : "");
+    d.textContent = s.title;
+    d.onclick = () => loadSession(s.id);
+    hl.appendChild(d);
+  });
+}
+
 const conv = document.getElementById("conv");
 const micBtn = document.getElementById("mic");
 const sendBtn = document.getElementById("send-btn");
@@ -333,6 +428,48 @@ const statusText = document.getElementById("status-text");
 
 let firstTurn = true;
 let activeUserBubble = null;
+
+function loadSession(id) {
+  if (activeSessionId === id && !firstTurn) return; // already active unless first load
+  const s = sessions.find(s => s.id === id);
+  if (!s) return;
+  activeSessionId = id;
+  conversationId = id;
+  renderSidebar();
+
+  conv.innerHTML = "";
+  firstTurn = false;
+  setSentiment(0, "awaiting input");
+  document.getElementById("intent-v").textContent = "—";
+  document.getElementById("ctag-v").textContent = "—";
+  document.getElementById("seq-v").textContent = "—";
+  document.getElementById("plan-conf").textContent = "—";
+  document.getElementById("plan-bar").style.width = "0%";
+  document.getElementById("plan-out").textContent = "—";
+  document.getElementById("plan-actions").innerHTML = "";
+
+  if (s.turns.length === 0) {
+    conv.innerHTML = `<div class="empty"><div><h2>Press the mic and start the call.</h2><div>I'll transcribe what the customer says, then provide the bot's response.</div><div class="hint">No mic? Type a customer line below and hit <code>Send</code>.</div></div></div>`;
+    firstTurn = true;
+    return;
+  }
+
+  let lastTurnEl = null;
+  s.turns.forEach(t => {
+    if (t.type === "user") {
+      lastTurnEl = renderUserTurn(t.data.text, false);
+    } else if (t.type === "bot" && lastTurnEl) {
+      renderResponse(lastTurnEl, t.data);
+      lastTurnEl.querySelector(".text").classList.remove("transcribing");
+    }
+  });
+}
+
+document.getElementById("new-chat-btn").addEventListener("click", () => {
+  const newId = "ui-" + Math.random().toString(36).slice(2, 10);
+  initSession(newId);
+  loadSession(newId);
+});
 
 function setStatus(s, live = false) {
   statusText.textContent = s;
@@ -441,6 +578,8 @@ function renderResponse(turnEl, data) {
 
 async function sendTurn(text) {
   if (!text || !text.trim()) return;
+  updateSessionTitle(text);
+  addTurnToHistory("user", { text });
   const turnEl = renderUserTurn(text, false);
   const sug = document.createElement("div");
   sug.className = "suggest loading";
@@ -458,6 +597,7 @@ async function sendTurn(text) {
     const data = await r.json();
     sug.remove();
     renderResponse(turnEl, data);
+    addTurnToHistory("bot", data);
     setStatus("ready");
   } catch (e) {
     sug.classList.remove("loading");
@@ -478,6 +618,13 @@ textIn.addEventListener("keydown", (e) => {
 
 resetBtn.addEventListener("click", async () => {
   await fetch("/reset/" + conversationId, { method: "POST" });
+  const s = sessions.find(x => x.id === activeSessionId);
+  if (s) {
+    s.turns = [];
+    s.title = "New Conversation";
+    saveSessions();
+    renderSidebar();
+  }
   conv.innerHTML = `<div class="empty"><div><h2>Cleared. Ready for a new call.</h2></div></div>`;
   firstTurn = true;
   document.getElementById("intent-v").textContent = "—";
@@ -544,7 +691,10 @@ function sendAudioAndReset(audioBlob) {
       sug.remove();
       bubble.querySelector(".text").classList.remove("transcribing");
       bubble.querySelector(".text").textContent = data.state.text;
+      updateSessionTitle(data.state.text);
+      addTurnToHistory("user", { text: data.state.text });
       renderResponse(bubble, data);
+      addTurnToHistory("bot", data);
       setStatus("ready");
     })
     .catch((e) => {
@@ -655,6 +805,14 @@ micBtn.addEventListener("click", async () => {
 });
 
 setStatus("idle");
+
+if (sessions.length > 0) {
+  loadSession(sessions[0].id);
+} else {
+  const newId = "ui-" + Math.random().toString(36).slice(2, 10);
+  initSession(newId);
+  loadSession(newId);
+}
 </script>
 </body>
 </html>
