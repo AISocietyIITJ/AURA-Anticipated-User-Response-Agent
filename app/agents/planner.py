@@ -26,7 +26,7 @@ def _bucket(score: float) -> str:
     return "neu"
 
 
-def _query_exact(intent: str, ctag: str, bucket: str) -> dict | None:
+async def _query_exact(intent: str, ctag: str, bucket: str) -> dict | None:
     cypher = """
     MATCH (st:State {key: $key})
     OPTIONAL MATCH (st)-[u:USED_AGENT_TAG]->(a:AgentTag)
@@ -39,8 +39,9 @@ def _query_exact(intent: str, ctag: str, bucket: str) -> dict | None:
     RETURN tags, outcomes, nexts
     """
     key = f"{intent}|{ctag}|{bucket}"
-    with graph_session() as s:
-        rec = s.run(cypher, key=key).single()
+    async with graph_session() as s:
+        result = await s.run(cypher, key=key)
+        rec = await result.single()
     if not rec:
         return None
     tags = [t for t in (rec["tags"] or []) if t.get("tag")]
@@ -49,7 +50,7 @@ def _query_exact(intent: str, ctag: str, bucket: str) -> dict | None:
     return {"tags": tags, "outcomes": rec["outcomes"] or [], "nexts": rec["nexts"] or []}
 
 
-def _query_by_intent_ctag(intent: str, ctag: str) -> dict | None:
+async def _query_by_intent_ctag(intent: str, ctag: str) -> dict | None:
     cypher = """
     MATCH (st:State {intent: $intent, customer_tag: $ctag})
     OPTIONAL MATCH (st)-[u:USED_AGENT_TAG]->(a:AgentTag)
@@ -57,14 +58,15 @@ def _query_by_intent_ctag(intent: str, ctag: str) -> dict | None:
     WHERE tag IS NOT NULL
     RETURN collect({tag: tag, count: count}) AS tags
     """
-    with graph_session() as s:
-        rec = s.run(cypher, intent=intent, ctag=ctag).single()
+    async with graph_session() as s:
+        result = await s.run(cypher, intent=intent, ctag=ctag)
+        rec = await result.single()
     if not rec or not rec["tags"]:
         return None
     return {"tags": rec["tags"], "outcomes": [], "nexts": []}
 
 
-def _query_by_intent(intent: str) -> dict | None:
+async def _query_by_intent(intent: str) -> dict | None:
     cypher = """
     MATCH (st:State {intent: $intent})
     OPTIONAL MATCH (st)-[u:USED_AGENT_TAG]->(a:AgentTag)
@@ -72,8 +74,9 @@ def _query_by_intent(intent: str) -> dict | None:
     WHERE tag IS NOT NULL
     RETURN collect({tag: tag, count: count}) AS tags
     """
-    with graph_session() as s:
-        rec = s.run(cypher, intent=intent).single()
+    async with graph_session() as s:
+        result = await s.run(cypher, intent=intent)
+        rec = await result.single()
     if not rec or not rec["tags"]:
         return None
     return {"tags": rec["tags"], "outcomes": [], "nexts": []}
@@ -127,25 +130,25 @@ def compute_confidence(res: dict) -> tuple[float, dict]:
     }
 
 
-def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
+async def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
     intent = state.intent
     ctag = state.customer_tag
     bucket = _bucket(state.sentiment.score)
 
-    def get_plan() -> tuple[dict | None, float, list[str]]:
-        r = _query_exact(intent, ctag, bucket)
+    async def get_plan() -> tuple[dict | None, float, list[str]]:
+        r = await _query_exact(intent, ctag, bucket)
         if r:
             c, _ = compute_confidence(r)
             if c >= CONFIDENCE_THRESHOLD:
                 return r, c, [f"Matched state {intent}|{ctag}|{bucket}"]
 
-        r = _query_by_intent_ctag(intent, ctag)
+        r = await _query_by_intent_ctag(intent, ctag)
         if r:
             c, _ = compute_confidence(r)
             if c >= CONFIDENCE_THRESHOLD:
                 return r, c, [f"Backed off to ({intent}, {ctag}) ignoring sentiment"]
 
-        r = _query_by_intent(intent)
+        r = await _query_by_intent(intent)
         if r:
             c, _ = compute_confidence(r)
             if c >= CONFIDENCE_THRESHOLD:
@@ -153,7 +156,7 @@ def plan(state: State, top_k: int = 3) -> PlannerSuggestion:
 
         return None, 0.0, []
 
-    res, final_confidence, rationale_parts = get_plan()
+    res, final_confidence, rationale_parts = await get_plan()
 
     if not res:
         return PlannerSuggestion(

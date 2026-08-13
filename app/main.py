@@ -51,8 +51,8 @@ class TurnIn(BaseModel):
 @app.on_event("startup")
 async def _startup():
     try:
-        with graph_session() as s:
-            s.run("RETURN 1").consume()
+        async with graph_session() as s:
+            await (await s.run("RETURN 1")).consume()
         log.info("Neo4j ready at %s", settings.neo4j_uri)
     except Exception as e:
         log.warning("Neo4j not reachable at %s: %s", settings.neo4j_uri, e)
@@ -60,15 +60,15 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    close_driver()
+    await close_driver()
 
 
 @app.get("/health")
 async def health():
     out = {"status": "ok"}
     try:
-        with graph_session() as s:
-            s.run("RETURN 1").consume()
+        async with graph_session() as s:
+            await (await s.run("RETURN 1")).consume()
         out["neo4j"] = "up"
     except Exception as e:
         out["neo4j"] = f"down: {e}"
@@ -76,12 +76,12 @@ async def health():
 
 
 async def _process_turn(conversation_id: str, text: str) -> CopilotResponse:
-    interp_task = asyncio.to_thread(interpreter.interpret, text)
-    sent_task = asyncio.to_thread(sentiment.analyze, text)
+    interp_task = interpreter.interpret(text)
+    sent_task = sentiment.analyze(text)
     interp, sent = await asyncio.gather(interp_task, sent_task)
 
     st = state.build_state(conversation_id, text, interp, sent)
-    plan = await asyncio.to_thread(planner.plan, st)
+    plan = await planner.plan(st)
 
     try:
         reply = await llm.generate(st, plan)
