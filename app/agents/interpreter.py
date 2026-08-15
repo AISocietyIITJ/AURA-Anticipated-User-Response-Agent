@@ -63,33 +63,37 @@ Customer message:
 """
 
 
-def _call_llm(prompt: str) -> str:
-    url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
-    headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
+async def _call_llm(prompt: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {settings.llm_api_key}",
+        "Content-Type": "application/json",
+    }
     payload = {
         "model": settings.llm_model,
         "messages": [
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 120,
+        "max_tokens": 150,
         "temperature": 0.0,
     }
-    with httpx.Client(timeout=60.0) as client:
-        r = client.post(url, json=payload, headers=headers)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+    return data["choices"][0]["message"]["content"].strip()
 
 
 def _extract_json(text: str) -> dict:
     """Extract JSON from model output, stripping any surrounding markdown fences."""
-    # Strip ```json ... ``` fences if present
-    text = re.sub(r"^```[a-z]*\n?", "", text.strip(), flags=re.IGNORECASE)
-    text = re.sub(r"\n?```$", "", text.strip())
-    return json.loads(text)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object found in text: {text}")
+    return json.loads(match.group(0))
 
 
-def interpret(text: str) -> Interpretation:
+async def interpret(text: str) -> Interpretation:
     text = (text or "").strip()
     if not text:
         return Interpretation(intent="General Inquiry", customer_tag="CUSTOMER_OTHER")
@@ -101,27 +105,16 @@ def interpret(text: str) -> Interpretation:
     )
 
     try:
-        raw = _call_llm(prompt)
-        data = _extract_json(raw)
-
-        # Validate / clamp values
-        intent = data.get("intent", "General Inquiry")
-        if intent not in INTENTS:
-            intent = "General Inquiry"
-
-        ctag = data.get("customer_tag", "CUSTOMER_OTHER")
-        if ctag not in CUSTOMER_TAGS:
-            ctag = "CUSTOMER_OTHER"
-
+        raw_out = await _call_llm(prompt)
+        obj = _extract_json(raw_out)
         return Interpretation(
-            intent=intent,
-            customer_tag=ctag,
-            intent_confidence=float(data.get("intent_confidence", 0.8)),
-            customer_tag_confidence=float(data.get("customer_tag_confidence", 0.8)),
+            intent=obj.get("intent", "General Inquiry"),
+            customer_tag=obj.get("customer_tag", "CUSTOMER_OTHER"),
+            intent_confidence=float(obj.get("intent_confidence", 0.0)),
+            customer_tag_confidence=float(obj.get("customer_tag_confidence", 0.0)),
         )
-
-    except Exception as exc:
-        log.warning("Intent classification failed: %s — using fallback", exc)
+    except Exception as e:
+        log.error("Interpretation failed: %s (text=%r)", e, text)
         return Interpretation(
             intent="General Inquiry",
             customer_tag="CUSTOMER_OTHER",

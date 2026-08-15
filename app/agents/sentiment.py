@@ -38,7 +38,7 @@ Customer message:
 """
 
 
-def _call_llm(prompt: str) -> str:
+async def _call_llm(prompt: str) -> str:
     url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
     payload = {
@@ -50,25 +50,26 @@ def _call_llm(prompt: str) -> str:
         "max_tokens": 40,
         "temperature": 0.0,
     }
-    with httpx.Client(timeout=30.0) as client:
-        r = client.post(url, json=payload, headers=headers)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(url, json=payload, headers=headers)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
 def _extract_json(text: str) -> dict:
-    text = re.sub(r"^```[a-z]*\n?", "", text.strip(), flags=re.IGNORECASE)
-    text = re.sub(r"\n?```$", "", text.strip())
-    return json.loads(text)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object found in text: {text}")
+    return json.loads(match.group(0))
 
 
-def analyze(text: str) -> Sentiment:
+async def analyze(text: str) -> Sentiment:
     text = (text or "").strip()
     if not text:
         return Sentiment(score=0.0, label="neutral")
 
     try:
-        raw = _call_llm(_USER_TMPL.format(text=text))
+        raw = await _call_llm(_USER_TMPL.format(text=text))
         data = _extract_json(raw)
 
         label = data.get("label", "neutral").lower()

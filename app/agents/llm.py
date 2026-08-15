@@ -26,7 +26,6 @@ Keep your responses relatively short, conversational, and grounded in the custom
 Do not provide coaching instructions, just provide the actual response you would send to the customer.
 """
 
-
 def _build_user_prompt(state: State, plan: PlannerSuggestion) -> str:
     history = "\n".join(f"- {h}" for h in state.history[-4:]) or "(none yet)"
     if plan.used_fallback or not plan.next_agent_tags:
@@ -54,7 +53,6 @@ Planner guidance:
 {guidance}
 
 Write your direct response to the customer now."""
-
 
 async def generate(state: State, plan: PlannerSuggestion) -> str:
     payload = {
